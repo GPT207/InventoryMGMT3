@@ -1,0 +1,737 @@
+import tkinter as tk
+from tkinter import messagebox, filedialog, ttk
+import sqlite3
+import logging
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from datetime import datetime, date
+import shutil
+import os
+from PIL import Image, ImageTk
+
+# Set up logging for low inventory notifications
+logging.basicConfig(
+    filename='inventory_notifications.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Base User Class with Inheritance
+class User:
+    def __init__(self, user_id, username, password, role):
+        self.user_id = user_id
+        self.username = username
+        self.password = password
+        self.role = role
+
+    def authenticate(self, username, password):
+        return self.username == username and self.password == password
+
+# Derived Classes with Polymorphism
+class Manager(User):
+    def manage_inventory(self):
+        return "Managing inventory as Manager"
+
+    def generate_report(self):
+        return "Generating report as Manager"
+
+class Cashier(User):
+    def manage_inventory(self):
+        return "Managing inventory as Cashier"
+
+    def process_customer(self):
+        return "Processing customer as Cashier"
+
+# Hierarchical Composite Data Structure for SKUs
+class SKUComposite:
+    def __init__(self, sku_id, sku_name, price, quantity_in_stock):
+        self.sku_id = sku_id
+        self.sku_name = sku_name
+        self.price = price
+        self.quantity_in_stock = quantity_in_stock
+        self.attributes = {"description": "", "image_path": ""}
+
+    def add_attribute(self, key, value):
+        self.attributes[key] = value
+
+# Product Manager with Recursion
+class ProductManager:
+    def __init__(self):
+        self.products = []
+
+    def recursive_search(self, sku_id, products_list, index=0):
+        if index >= len(products_list):
+            return None
+        if products_list[index].sku_id == sku_id:
+            return products_list[index]
+        return self.recursive_search(sku_id, products_list, index + 1)
+
+    def add_product(self, product):
+        self.products.append(product)
+
+# Database Initialization with UNIQUE constraint on username
+def initialize_database():
+    conn = sqlite3.connect('retail_management_system.db')
+    cursor = conn.cursor()
+
+    # Users Table with UNIQUE username
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username VARCHAR(50) NOT NULL UNIQUE,
+            password VARCHAR(255) NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('Manager', 'Cashier'))
+        )
+    ''')
+
+    # Employees Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Employees (
+            employee_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name VARCHAR(100) NOT NULL,
+            user_id INTEGER,
+            attendance_count INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES Users(user_id)
+        )
+    ''')
+
+    # CustomerDetails Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS CustomerDetails (
+            customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            billing_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00
+        )
+    ''')
+
+    # SKU_Detail Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS SKU_Detail (
+            sku_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku_name VARCHAR(100) NOT NULL,
+            description TEXT NOT NULL,
+            price DECIMAL(10,2) NOT NULL,
+            image_path VARCHAR(255),
+            quantity_in_stock INTEGER NOT NULL,
+            notification_email_sent BOOLEAN DEFAULT FALSE
+        )
+    ''')
+
+    # CashInCashOut Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS CashInCashOut (
+            transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_type TEXT NOT NULL CHECK(transaction_type IN ('Cash-in', 'Cash-out')),
+            amount DECIMAL(10,2) NOT NULL,
+            date DATE NOT NULL,
+            manager_id INTEGER,
+            FOREIGN KEY (manager_id) REFERENCES Employees(employee_id)
+        )
+    ''')
+
+    # TaxFilings Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS TaxFilings (
+            filing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date DATE NOT NULL,
+            tax_rate DECIMAL(5,2) NOT NULL,
+            total_sales_amt DECIMAL(15,2) NOT NULL,
+            tax_deductible DECIMAL(15,2) NOT NULL,
+            user_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES Employees(employee_id)
+        )
+    ''')
+
+    # Attendance Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Attendance (
+            attendance_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER,
+            date DATE NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('Present', 'Absent')),
+            FOREIGN KEY (employee_id) REFERENCES Employees(employee_id)
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+# Main Application Class
+class RetailManagementSystem:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Retail Management System")
+        self.root.geometry("900x700")
+        self.root.configure(bg="#ffffff")
+
+        # Updated style with larger font
+        self.style = {
+            "font": ("Arial", 14),
+            "bg": "#ffffff",
+            "fg": "#000000",
+            "button_bg": "#007BFF",
+            "button_fg": "#ffffff",
+            "entry_bg": "#ffffff",
+            "entry_fg": "#000000"
+        }
+
+        # Treeview styling
+        style = ttk.Style()
+        style.configure("Treeview", background="#ffffff", foreground="#000000", fieldbackground="#ffffff", rowheight=25, font=("Arial", 14))
+        style.map("Treeview", background=[('selected', '#007BFF')])
+        style.configure("Treeview.Heading", font=("Arial", 14, "bold"), background="#007BFF", foreground="#ffffff")
+
+        self.current_user = None
+        self.current_role = None
+        self.product_manager = ProductManager()
+        initialize_database()
+        self.show_login_screen()
+
+    # Login Screen with username instead of user_id
+    def show_login_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        tk.Label(self.root, text="Retail Management System", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Username:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        self.username_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        self.username_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Password:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.password_entry = tk.Entry(frame, show="*", font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        self.password_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Login", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=10,
+                  command=self.validate_login).grid(row=2, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Register", font=self.style["font"], bg="#28a745", fg="#ffffff", width=10,
+                  command=self.show_register_screen).grid(row=3, column=0, columnspan=2, pady=5)
+
+    def validate_login(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+        if not username or not password:
+            messagebox.showerror("Login Failed", "Username and password are required")
+            return
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, role FROM Users WHERE username = ? AND password = ?", (username, password))
+        user = cursor.fetchone()
+        conn.close()
+
+        if user:
+            self.current_user = user[0]
+            self.current_role = user[1]
+            if self.current_role == "Manager":
+                self.show_manager_screen()
+            else:
+                self.show_cashier_screen()
+        else:
+            messagebox.showerror("Login Failed", "Invalid credentials")
+
+    # Register Screen
+    def show_register_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Register Employee", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Username:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        username_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        username_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Password:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        password_entry = tk.Entry(frame, show="*", font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        password_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Role:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        role_var = tk.StringVar(value="Manager")
+        tk.OptionMenu(frame, role_var, "Manager", "Cashier").grid(row=2, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Register", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=10,
+                  command=lambda: self.register_user(username_entry.get(), password_entry.get(), role_var.get())).grid(row=3, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=10,
+                  command=self.show_login_screen).grid(row=4, column=0, columnspan=2, pady=5)
+
+    def register_user(self, username, password, role):
+        if not username or not password:
+            messagebox.showerror("Error", "Username and password are required")
+            return
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Users (username, password, role) VALUES (?, ?, ?)", (username, password, role))
+            conn.commit()
+            messagebox.showinfo("Success", f"{role} added successfully")
+            self.show_login_screen()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "Username already taken")
+        finally:
+            conn.close()
+
+    # Manager Screen
+    def show_manager_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Manager Dashboard", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Button(frame, text="Manage Employees", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_employee_management).grid(row=0, column=0, padx=10, pady=10)
+        tk.Button(frame, text="Financial Management", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_financial_management).grid(row=0, column=1, padx=10, pady=10)
+        tk.Button(frame, text="Tax Filing", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_tax_filing).grid(row=1, column=0, padx=10, pady=10)
+        tk.Button(frame, text="Manage SKU", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_sku_management).grid(row=1, column=1, padx=10, pady=10)
+        tk.Button(frame, text="Generate Report", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.generate_financial_report).grid(row=2, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="View Attendance", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_attendance).grid(row=3, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Logout", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_login_screen).grid(row=4, column=0, columnspan=2, pady=10)
+
+    # Cashier Screen
+    def show_cashier_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Cashier Dashboard", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Button(frame, text="Mark Attendance", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.mark_attendance).grid(row=0, column=0, padx=10, pady=10)
+        tk.Button(frame, text="Manage Customers", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_customer_management).grid(row=0, column=1, padx=10, pady=10)
+        tk.Button(frame, text="View SKUs", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=self.show_sku_management_cashier).grid(row=1, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Logout", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_login_screen).grid(row=2, column=0, columnspan=2, pady=10)
+
+    # Employee Management
+    def show_employee_management(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Employee Management", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Employee Name:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        name_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        name_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="User ID:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        user_id_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        user_id_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Add Employee", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=lambda: self.add_employee(name_entry.get(), user_id_entry.get())).grid(row=2, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_manager_screen).grid(row=3, column=0, columnspan=2, pady=10)
+
+    def add_employee(self, name, user_id):
+        if not name or not user_id:
+            messagebox.showerror("Error", "Name and User ID are required")
+            return
+        if not user_id.isdigit():
+            messagebox.showerror("Error", "User ID must be a number")
+            return
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Employees (name, user_id) VALUES (?, ?)", (name, int(user_id)))
+            conn.commit()
+            messagebox.showinfo("Success", "Employee added successfully")
+            self.show_manager_screen()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "User ID does not exist or is already assigned")
+        finally:
+            conn.close()
+
+    # Financial Management
+    def show_financial_management(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Financial Management", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Transaction Type:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        trans_type = tk.StringVar(value="Cash-in")
+        tk.OptionMenu(frame, trans_type, "Cash-in", "Cash-out").grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Amount:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        amount_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        amount_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Submit", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=lambda: self.process_transaction(trans_type.get(), amount_entry.get())).grid(row=2, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_manager_screen).grid(row=3, column=0, columnspan=2, pady=10)
+
+        self.profit_label = tk.Label(frame, text="Net Profit/Loss: $0.00", font=self.style["font"], bg="#f5f5f5", fg="#000000")
+        self.profit_label.grid(row=4, column=0, columnspan=2, pady=10)
+        self.update_profit_loss()
+
+    def process_transaction(self, trans_type, amount):
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                messagebox.showerror("Error", "Amount must be positive")
+                return
+            conn = sqlite3.connect('retail_management_system.db')
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO CashInCashOut (transaction_type, amount, date, manager_id) VALUES (?, ?, ?, ?)",
+                           (trans_type, amount, date.today(), self.current_user))
+            conn.commit()
+            self.update_profit_loss()
+            messagebox.showinfo("Success", "Transaction recorded")
+            conn.close()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid amount")
+
+    def update_profit_loss(self):
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(amount) FROM CashInCashOut WHERE transaction_type = 'Cash-in'")
+        cash_in = cursor.fetchone()[0] or 0
+        cursor.execute("SELECT SUM(amount) FROM CashInCashOut WHERE transaction_type = 'Cash-out'")
+        cash_out = cursor.fetchone()[0] or 0
+        profit_loss = cash_in - cash_out
+        self.profit_label.config(text=f"Net Profit/Loss: ${profit_loss:.2f}")
+        conn.close()
+
+    # Tax Filing
+    def show_tax_filing(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Tax Filing", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Tax Rate (%):", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tax_rate_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        tax_rate_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Calculate & Generate", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=lambda: self.generate_tax_report(tax_rate_entry.get())).grid(row=1, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_manager_screen).grid(row=2, column=0, columnspan=2, pady=10)
+
+    def generate_tax_report(self, tax_rate):
+        try:
+            tax_rate = float(tax_rate)
+            if not (0 <= tax_rate <= 100):
+                messagebox.showerror("Error", "Tax rate must be between 0 and 100")
+                return
+            tax_rate /= 100
+            conn = sqlite3.connect('retail_management_system.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT SUM(amount) FROM CashInCashOut WHERE transaction_type = 'Cash-in'")
+            total_sales = cursor.fetchone()[0] or 0
+            tax_deductible = total_sales * tax_rate
+            cursor.execute("INSERT INTO TaxFilings (date, tax_rate, total_sales_amt, tax_deductible, user_id) VALUES (?, ?, ?, ?, ?)",
+                           (date.today(), tax_rate, total_sales, tax_deductible, self.current_user))
+            conn.commit()
+
+            # Generate PDF
+            c = canvas.Canvas(f"tax_report_{date.today()}.pdf", pagesize=letter)
+            c.drawString(100, 750, f"Tax Report - {date.today()}")
+            c.drawString(100, 730, f"Total Sales: ${total_sales:.2f}")
+            c.drawString(100, 710, f"Tax Rate: {tax_rate*100:.2f}%")
+            c.drawString(100, 690, f"Tax Deductible: ${tax_deductible:.2f}")
+            c.save()
+            messagebox.showinfo("Success", f"Tax report generated as tax_report_{date.today()}.pdf")
+            conn.close()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid tax rate")
+
+    # Financial Report
+    def generate_financial_report(self):
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(amount) FROM CashInCashOut WHERE transaction_type = 'Cash-in'")
+        cash_in = cursor.fetchone()[0] or 0
+        cursor.execute("SELECT SUM(amount) FROM CashInCashOut WHERE transaction_type = 'Cash-out'")
+        cash_out = cursor.fetchone()[0] or 0
+        profit_loss = cash_in - cash_out
+
+        c = canvas.Canvas(f"financial_report_{date.today()}.pdf", pagesize=letter)
+        c.drawString(100, 750, f"Financial Report - {date.today()}")
+        c.drawString(100, 730, f"Total Cash-In: ${cash_in:.2f}")
+        c.drawString(100, 710, f"Total Cash-Out: ${cash_out:.2f}")
+        c.drawString(100, 690, f"Net Profit/Loss: ${profit_loss:.2f}")
+        c.save()
+        messagebox.showinfo("Success", f"Financial report generated as financial_report_{date.today()}.pdf")
+        conn.close()
+
+    # Attendance Management
+    def show_attendance(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Attendance Management", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20, fill="both", expand=True)
+
+        self.attendance_tree = ttk.Treeview(frame, columns=("Employee", "Date", "Status"), show="headings")
+        self.attendance_tree.heading("Employee", text="Employee")
+        self.attendance_tree.heading("Date", text="Date")
+        self.attendance_tree.heading("Status", text="Status")
+        self.attendance_tree.column("Employee", width=200)
+        self.attendance_tree.column("Date", width=100)
+        self.attendance_tree.column("Status", width=100)
+        self.attendance_tree.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(frame, orient="vertical", command=self.attendance_tree.yview)
+        self.attendance_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+
+        self.load_attendance()
+
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_manager_screen).pack(pady=10)
+
+    def load_attendance(self):
+        for item in self.attendance_tree.get_children():
+            self.attendance_tree.delete(item)
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT e.name, a.date, a.status FROM Attendance a JOIN Employees e ON a.employee_id = e.employee_id")
+        records = cursor.fetchall()
+        sorted_records = sorted(records, key=lambda x: x[1], reverse=True)
+        for i, record in enumerate(sorted_records):
+            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+            self.attendance_tree.insert("", "end", values=record, tags=(tag,))
+        self.attendance_tree.tag_configure('evenrow', background='#ffffff')
+        self.attendance_tree.tag_configure('oddrow', background='#e8e8e8')
+        conn.close()
+
+    def mark_attendance(self):
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT employee_id FROM Employees WHERE user_id = ?", (self.current_user,))
+            employee_id = cursor.fetchone()
+            if not employee_id:
+                messagebox.showerror("Error", "Employee not found for this user")
+                return
+            employee_id = employee_id[0]
+            cursor.execute("SELECT * FROM Attendance WHERE employee_id = ? AND date = ?", (employee_id, date.today()))
+            if cursor.fetchone():
+                messagebox.showerror("Error", "Attendance already marked for today")
+                return
+            cursor.execute("INSERT INTO Attendance (employee_id, date, status) VALUES (?, ?, 'Present')",
+                           (employee_id, date.today()))
+            conn.commit()
+            messagebox.showinfo("Success", "Attendance marked")
+            if self.current_role == "Manager":
+                self.load_attendance()
+        except sqlite3.Error as e:
+            messagebox.showerror("Error", f"Database error: {e}")
+        finally:
+            conn.close()
+
+    # Customer Management
+    def show_customer_management(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="Customer Management", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="Phone Number:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        phone_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        phone_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Name:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        name_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        name_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Billing Amount:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        billing_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        billing_entry.grid(row=2, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Add Customer", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=lambda: self.add_customer(phone_entry.get(), name_entry.get(), billing_entry.get())).grid(row=3, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Search Customer", font=self.style["font"], bg="#28a745", fg="#ffffff", width=15,
+                  command=lambda: self.search_customer(phone_entry.get())).grid(row=4, column=0, columnspan=2, pady=5)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_cashier_screen).grid(row=5, column=0, columnspan=2, pady=10)
+
+    def add_customer(self, phone, name, billing):
+        if not phone or not name or not billing:
+            messagebox.showerror("Error", "All fields are required")
+            return
+        if not phone.isdigit() or len(phone) != 10:
+            messagebox.showerror("Error", "Phone number must be 10 digits")
+            return
+        try:
+            billing = float(billing)
+            if billing <= 0:
+                messagebox.showerror("Error", "Billing amount must be positive")
+                return
+            conn = sqlite3.connect('retail_management_system.db')
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO CustomerDetails (phone_number, name, billing_amount) VALUES (?, ?, ?)",
+                           (phone, name, billing))
+            conn.commit()
+            messagebox.showinfo("Success", "Customer added")
+            conn.close()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid billing amount")
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "Phone number already exists")
+
+    def search_customer(self, phone):
+        if not phone:
+            messagebox.showerror("Error", "Phone number is required")
+            return
+        if not phone.isdigit() or len(phone) != 10:
+            messagebox.showerror("Error", "Phone number must be 10 digits")
+            return
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM CustomerDetails WHERE phone_number = ?", (phone,))
+        customer = cursor.fetchone()
+        conn.close()
+        if customer:
+            messagebox.showinfo("Customer Found", f"Name: {customer[2]}, Billing: ${customer[3]:.2f}")
+        else:
+            messagebox.showerror("Error", "Customer not found")
+
+    # SKU Management (Manager)
+    def show_sku_management(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="SKU Management (Manager)", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20)
+
+        tk.Label(frame, text="SKU Name:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        sku_name_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        sku_name_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Description:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        description_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        description_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Price:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        price_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        price_entry.grid(row=2, column=1, padx=10, pady=10)
+
+        tk.Label(frame, text="Quantity:", font=self.style["font"], bg="#f5f5f5", fg="#000000").grid(row=3, column=0, padx=10, pady=10, sticky="e")
+        quantity_entry = tk.Entry(frame, font=self.style["font"], bg=self.style["entry_bg"], fg=self.style["entry_fg"])
+        quantity_entry.grid(row=3, column=1, padx=10, pady=10)
+
+        tk.Button(frame, text="Add SKU", font=self.style["font"], bg=self.style["button_bg"], fg=self.style["button_fg"], width=15,
+                  command=lambda: self.add_sku(sku_name_entry.get(), description_entry.get(), price_entry.get(), quantity_entry.get())).grid(row=4, column=0, columnspan=2, pady=10)
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_manager_screen).grid(row=5, column=0, columnspan=2, pady=10)
+
+    # SKU Management (Cashier - View Only)
+    def show_sku_management_cashier(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root, text="SKU Management (Cashier)", font=("Arial", 24, "bold"), bg="#ffffff", fg="#000000").pack(pady=20)
+        frame = tk.Frame(self.root, bg="#f5f5f5", bd=2, relief="groove")
+        frame.pack(pady=20, padx=20, fill="both", expand=True)
+
+        self.sku_tree = ttk.Treeview(frame, columns=("ID", "Name", "Price", "Quantity"), show="headings")
+        self.sku_tree.heading("ID", text="SKU ID")
+        self.sku_tree.heading("Name", text="Name")
+        self.sku_tree.heading("Price", text="Price")
+        self.sku_tree.heading("Quantity", text="Quantity")
+        self.sku_tree.column("ID", width=100)
+        self.sku_tree.column("Name", width=200)
+        self.sku_tree.column("Price", width=100)
+        self.sku_tree.column("Quantity", width=100)
+        self.sku_tree.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(frame, orient="vertical", command=self.sku_tree.yview)
+        self.sku_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+
+        self.load_skus()
+
+        tk.Button(frame, text="Back", font=self.style["font"], bg="#f44336", fg="#ffffff", width=15,
+                  command=self.show_cashier_screen).pack(pady=10)
+
+    def load_skus(self):
+        for item in self.sku_tree.get_children():
+            self.sku_tree.delete(item)
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT sku_id, sku_name, price, quantity_in_stock FROM SKU_Detail")
+        skus = cursor.fetchall()
+        for i, sku in enumerate(skus):
+            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+            self.sku_tree.insert("", "end", values=sku, tags=(tag,))
+        self.sku_tree.tag_configure('evenrow', background='#ffffff')
+        self.sku_tree.tag_configure('oddrow', background='#e8e8e8')
+        conn.close()
+
+    def add_sku(self, sku_name, description, price, quantity):
+        if not sku_name or not description or not price or not quantity:
+            messagebox.showerror("Error", "All fields are required")
+            return
+        try:
+            price = float(price)
+            if price <= 0:
+                messagebox.showerror("Error", "Price must be positive")
+                return
+            quantity = int(quantity)
+            if quantity < 0:
+                messagebox.showerror("Error", "Quantity cannot be negative")
+                return
+            image_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png")])
+            if not image_path:
+                messagebox.showerror("Error", "Image is required")
+                return
+
+            if not os.path.exists('images'):
+                os.makedirs('images')
+
+            new_image_path = os.path.join('images', os.path.basename(image_path))
+            shutil.copy(image_path, new_image_path)
+
+            conn = sqlite3.connect('retail_management_system.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO SKU_Detail (sku_name, description, price, image_path, quantity_in_stock)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (sku_name, description, price, new_image_path, quantity))
+            conn.commit()
+            self.check_low_inventory()
+            messagebox.showinfo("Success", "SKU added")
+            conn.close()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid price or quantity")
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "SKU name already exists")
+        except OSError as e:
+            messagebox.showerror("Error", f"File operation failed: {e}")
+
+    # Low Inventory Check
+    def check_low_inventory(self):
+        conn = sqlite3.connect('retail_management_system.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT sku_id, sku_name, quantity_in_stock, notification_email_sent FROM SKU_Detail")
+        skus = cursor.fetchall()
+        for sku in skus:
+            if sku[2] < 5 and not sku[3]:
+                logging.info(f"Low inventory notification for {sku[1]}. Stock: {sku[2]}")
+                cursor.execute("UPDATE SKU_Detail SET notification_email_sent = TRUE WHERE sku_id = ?", (sku[0],))
+                conn.commit()
+        conn.close()
+
+# Run Application
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = RetailManagementSystem(root)
+    app.check_low_inventory()
+    root.mainloop()
